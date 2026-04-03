@@ -144,6 +144,86 @@ jobs:
         run: |
           set -euo pipefail
 
+          cat > check_issue_assignees.py <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import urllib.request
+
+          event_name = os.environ["EVENT_NAME"]
+          before_sha = os.environ.get("BEFORE_SHA", "")
+          current_sha = os.environ["CURRENT_SHA"]
+          pr_base_sha = os.environ.get("PR_BASE_SHA", "")
+          pr_head_sha = os.environ.get("PR_HEAD_SHA", "")
+          repository = os.environ["REPOSITORY"]
+          token = os.environ["GH_TOKEN"]
+
+          if event_name == "pull_request":
+              rev_range = f"{pr_base_sha}..{pr_head_sha}"
+          elif before_sha and before_sha != "0000000000000000000000000000000000000000":
+              rev_range = f"{before_sha}..{current_sha}"
+          else:
+              base_commit = subprocess.run(
+                  ["git", "merge-base", "HEAD", "origin/master"],
+                  capture_output=True,
+                  text=True,
+                  check=False,
+              ).stdout.strip()
+              rev_range = f"{base_commit}..{current_sha}" if base_commit else f"{current_sha}^!"
+
+          commits = subprocess.run(
+              ["git", "rev-list", "--no-merges", rev_range],
+              capture_output=True,
+              text=True,
+              check=True,
+          ).stdout.splitlines()
+
+          if not commits:
+              print("No non-merge commits to validate.")
+              sys.exit(0)
+
+          seen_issue_ids = set()
+          pattern = re.compile(r"\(#(\d+)\)$")
+
+          for commit in commits:
+              subject = subprocess.run(
+                  ["git", "log", "--format=%s", "-n", "1", commit],
+                  capture_output=True,
+                  text=True,
+                  check=True,
+              ).stdout.strip()
+              match = pattern.search(subject)
+              if not match:
+                  print(f"::error title=Missing issue reference::{commit} => '{subject}' must end with '(#<issue ID>)'.")
+                  sys.exit(1)
+
+              issue_id = match.group(1)
+              if issue_id in seen_issue_ids:
+                  continue
+              seen_issue_ids.add(issue_id)
+
+              request = urllib.request.Request(
+                  f"https://api.github.com/repos/{repository}/issues/{issue_id}",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "github-actions-policy-check",
+                  },
+              )
+              with urllib.request.urlopen(request) as response:
+                  payload = json.load(response)
+
+              if len(payload.get("assignees", [])) < 1:
+                  print(
+                      f"::error title=Referenced issue must be assigned::"
+                      f"Issue #{issue_id} referenced by commit '{subject}' must be assigned to at least one person."
+                  )
+                  sys.exit(1)
+          PY
+
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             range="${PR_BASE_SHA}..${PR_HEAD_SHA}"
           elif [[ -n "${BEFORE_SHA:-}" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
@@ -164,56 +244,7 @@ jobs:
             echo "No non-merge commits to validate."
             exit 0
           fi
-
-          declare -A seen_issues=()
-
-          while IFS= read -r commit; do
-            subject="$(git log --format=%s -n 1 "$commit")"
-            issue_id="$(SUBJECT="$subject" python -c "import os, re; subject = os.environ['SUBJECT']; match = re.search(r'\\(#(\\d+)\\)$', subject); print(match.group(1) if match else '')")"
-
-            if [[ -z "$issue_id" ]]; then
-              echo "::error title=Missing issue reference::$commit => '$subject' must end with '(#<issue ID>)'."
-              exit 1
-            fi
-
-            if [[ -n "${seen_issues[$issue_id]:-}" ]]; then
-              continue
-            fi
-            seen_issues[$issue_id]=1
-
-            assignee_count="$(
-              ISSUE_ID="$issue_id" REPOSITORY="$REPOSITORY" GH_TOKEN="$GH_TOKEN" python - <<'PY'
-import json
-import os
-import sys
-import urllib.request
-
-issue_id = os.environ["ISSUE_ID"]
-repository = os.environ["REPOSITORY"]
-token = os.environ["GH_TOKEN"]
-
-request = urllib.request.Request(
-    f"https://api.github.com/repos/{repository}/issues/{issue_id}",
-    headers={
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "github-actions-policy-check",
-    },
-)
-
-with urllib.request.urlopen(request) as response:
-    payload = json.load(response)
-
-print(len(payload.get("assignees", [])))
-PY
-            )"
-
-            if [[ "$assignee_count" -lt 1 ]]; then
-              echo "::error title=Referenced issue must be assigned::Issue #$issue_id referenced by commit '$subject' must be assigned to at least one person."
-              exit 1
-            fi
-          done <<< "$commits"
+          python check_issue_assignees.py
 
   rust-ci:
     if: github.event_name != 'issues'
