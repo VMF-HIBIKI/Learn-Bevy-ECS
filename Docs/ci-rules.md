@@ -61,17 +61,21 @@ docs: document master branch policy (#13)
 
 - GitHub 不支持给 commit 单独设置 assignee。
 - 因此本仓库将“commit 需要 assign 一个人”解释为：commit 必须关联一个 Issue，且该 Issue 必须已经分配给至少 1 个 assignee。
+- 每个 Issue 只能对应 1 个非 merge commit。
+- 如果需要修复已存在的 commit，必须使用 `git commit --amend` 后再 force push 到工作分支，而不是继续追加新的 commit。
+- Commit 尾部的 `#<issue ID>` 必须与工作分支名前缀中的 issue ID 一致。
 
 ## PR 规范
 
 1. PR 的目标分支必须是 `master`。
 2. PR 对应的工作分支应从 Issue 创建，建议分支名以 Issue 编号开头，例如 `12-ci-workflow`。
-3. PR 合并前，必须通过仓库 CI。
-4. PR 必须至少获得 1 次审批后才能合并。
-5. PR 必须由 Code Owner 手动审批后才能合并。
-6. 当前仓库的 Code Owner 为 `@VMF-HIBIKI`，定义见 [CODEOWNERS](/e:/RustProject/Learn-Bevy-ECS/.github/CODEOWNERS)。
-7. 每个 PR 都必须至少分配给 1 个 assignee。
-8. 若 PR 中包含多个 Commit，则每个 Commit 都必须满足上面的 Commit 规范。
+3. 每个 PR 只能包含 1 个非 merge commit。
+4. 若提交后发现问题，必须在原 commit 上 `amend`，而不是继续追加新的 commit。
+5. PR 合并前，必须通过仓库 CI。
+6. PR 必须至少获得 1 次审批后才能合并。
+7. PR 必须由 Code Owner 手动审批后才能合并。
+8. 当前仓库的 Code Owner 为 `@VMF-HIBIKI`，定义见 [CODEOWNERS](/e:/RustProject/Learn-Bevy-ECS/.github/CODEOWNERS)。
+9. 每个 PR 都必须至少分配给 1 个 assignee。
 
 ## CI 检查内容
 
@@ -81,10 +85,11 @@ docs: document master branch policy (#13)
 2. Issue assignee 检查。
 3. PR 分支命名检查。
 4. PR assignee 检查。
-5. Commit 信息检查。
-6. Commit 关联 Issue 的 assignee 检查。
-7. `cargo +nightly fmt --all -- --check`
-8. `cargo +nightly clippy --all-targets --all-features -- -D warnings`
+5. 单 Issue 单 Commit 检查。
+6. Commit 信息与分支 issue ID 一致性检查。
+7. Commit 关联 Issue 的 assignee 检查。
+8. `cargo +nightly fmt --all -- --check`
+9. `cargo +nightly clippy --all-targets --all-features -- -D warnings`
 
 其中 `clippy` 以 `-D warnings` 运行，意味着任何警告都会导致 CI 失败。
 
