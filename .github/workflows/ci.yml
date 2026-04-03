@@ -1,0 +1,217 @@
+name: CI
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+      - reopened
+  pull_request:
+    branches:
+      - master
+  push:
+    branches-ignore:
+      - master
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  issue-policy:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate issue title
+        shell: bash
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+
+          regex='^(build|ci|docs|feat|fix|perf|refactor|test|demo|bench): .+'
+
+          if [[ ! "$ISSUE_TITLE" =~ $regex ]]; then
+            echo "::error title=Invalid issue title::Issue title must match '<type>: <short summary>'."
+            exit 1
+          fi
+
+      - name: Validate issue assignee
+        shell: bash
+        env:
+          ISSUE_ASSIGNEES_JSON: ${{ toJson(github.event.issue.assignees) }}
+        run: |
+          set -euo pipefail
+
+          count="$(python -c "import json, os; print(len(json.loads(os.environ['ISSUE_ASSIGNEES_JSON'])))")"
+
+          if [[ "$count" -lt 1 ]]; then
+            echo "::error title=Issue assignee required::Every issue must be assigned to at least one person."
+            exit 1
+          fi
+
+  policy:
+    if: github.event_name != 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate PR branch naming
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$HEAD_REF" =~ (^|.*/)[0-9]+[-/].+ ]]; then
+            echo "::error title=Invalid branch name::Create the branch from a GitHub issue so the branch name starts with the issue ID, for example '12-ci-workflow'."
+            exit 1
+          fi
+
+      - name: Validate PR assignee
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          PR_ASSIGNEES_JSON: ${{ toJson(github.event.pull_request.assignees) }}
+        run: |
+          set -euo pipefail
+
+          count="$(python -c "import json, os; print(len(json.loads(os.environ['PR_ASSIGNEES_JSON'])))")"
+
+          if [[ "$count" -lt 1 ]]; then
+            echo "::error title=PR assignee required::Every pull request must be assigned to at least one person."
+            exit 1
+          fi
+
+      - name: Validate commit messages
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          regex='^(build|ci|docs|feat|fix|perf|refactor|test|demo|bench): .+ \(#[0-9]+\)$'
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            range="${PR_BASE_SHA}..${PR_HEAD_SHA}"
+          elif [[ -n "${BEFORE_SHA:-}" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            range="${BEFORE_SHA}..${CURRENT_SHA}"
+          else
+            base_commit="$(git merge-base HEAD origin/master || true)"
+
+            if [[ -n "$base_commit" ]]; then
+              range="${base_commit}..${CURRENT_SHA}"
+            else
+              range="${CURRENT_SHA}^!"
+            fi
+          fi
+
+          commits="$(git rev-list --no-merges "$range")"
+
+          if [[ -z "$commits" ]]; then
+            echo "No non-merge commits to validate."
+            exit 0
+          fi
+
+          while IFS= read -r commit; do
+            subject="$(git log --format=%s -n 1 "$commit")"
+
+            if [[ ! "$subject" =~ $regex ]]; then
+              echo "::error title=Invalid commit message::$commit => '$subject' does not match '<type>: <short summary> (#<issue ID>)'."
+              exit 1
+            fi
+          done <<< "$commits"
+
+      - name: Validate commit issue assignees
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            range="${PR_BASE_SHA}..${PR_HEAD_SHA}"
+          elif [[ -n "${BEFORE_SHA:-}" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            range="${BEFORE_SHA}..${CURRENT_SHA}"
+          else
+            base_commit="$(git merge-base HEAD origin/master || true)"
+
+            if [[ -n "$base_commit" ]]; then
+              range="${base_commit}..${CURRENT_SHA}"
+            else
+              range="${CURRENT_SHA}^!"
+            fi
+          fi
+
+          commits="$(git rev-list --no-merges "$range")"
+
+          if [[ -z "$commits" ]]; then
+            echo "No non-merge commits to validate."
+            exit 0
+          fi
+
+          declare -A seen_issues=()
+
+          while IFS= read -r commit; do
+            subject="$(git log --format=%s -n 1 "$commit")"
+            issue_id="$(SUBJECT="$subject" python -c "import os, re; subject = os.environ['SUBJECT']; match = re.search(r'\\(#(\\d+)\\)$', subject); print(match.group(1) if match else '')")"
+
+            if [[ -z "$issue_id" ]]; then
+              echo "::error title=Missing issue reference::$commit => '$subject' must end with '(#<issue ID>)'."
+              exit 1
+            fi
+
+            if [[ -n "${seen_issues[$issue_id]:-}" ]]; then
+              continue
+            fi
+            seen_issues[$issue_id]=1
+
+            issue_json="$(curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$REPOSITORY/issues/$issue_id")"
+
+            assignee_count="$(ISSUE_JSON="$issue_json" python -c "import json, os; print(len(json.loads(os.environ['ISSUE_JSON']).get('assignees', [])))")"
+
+            if [[ "$assignee_count" -lt 1 ]]; then
+              echo "::error title=Referenced issue must be assigned::Issue #$issue_id referenced by commit '$subject' must be assigned to at least one person."
+              exit 1
+            fi
+          done <<< "$commits"
+
+  rust-ci:
+    if: github.event_name != 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo +nightly fmt --all -- --check
+
+      - name: Run clippy with warnings denied
+        run: cargo +nightly clippy --all-targets --all-features -- -D warnings
