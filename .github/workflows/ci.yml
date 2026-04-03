@@ -96,6 +96,7 @@ jobs:
           CURRENT_SHA: ${{ github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -122,11 +123,32 @@ jobs:
             exit 0
           fi
 
+          commit_count="$(printf '%s\n' "$commits" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+          if [[ "$commit_count" -ne 1 ]]; then
+            echo "::error title=Single commit required::Each issue may correspond to exactly one non-merge commit. Update the existing commit with amend instead of adding more commits."
+            exit 1
+          fi
+
+          branch_issue_id="$(BRANCH_NAME="$BRANCH_NAME" python -c "import os, re; name = os.environ['BRANCH_NAME']; match = re.match(r'^(?:.*/)?(\d+)[-/].+', name); print(match.group(1) if match else '')")"
+
+          if [[ -z "$branch_issue_id" ]]; then
+            echo "::error title=Issue branch required::Branch name must start with the issue ID, for example '12-ci-workflow'."
+            exit 1
+          fi
+
           while IFS= read -r commit; do
             subject="$(git log --format=%s -n 1 "$commit")"
 
             if [[ ! "$subject" =~ $regex ]]; then
               echo "::error title=Invalid commit message::$commit => '$subject' does not match '<type>: <short summary> (#<issue ID>)'."
+              exit 1
+            fi
+
+            commit_issue_id="$(SUBJECT="$subject" python -c "import os, re; subject = os.environ['SUBJECT']; match = re.search(r'\\(#(\\d+)\\)$', subject); print(match.group(1) if match else '')")"
+
+            if [[ "$commit_issue_id" != "$branch_issue_id" ]]; then
+              echo "::error title=Issue mismatch::Commit '$subject' must reference the same issue ID as the branch prefix '$BRANCH_NAME'."
               exit 1
             fi
           done <<< "$commits"
