@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "Learn-Bevy-ECS"
+name = "learn-bevy-ecs"
 version = "0.1.0"
