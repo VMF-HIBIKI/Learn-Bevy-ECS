@@ -17,6 +17,34 @@
 7. 处理命令延迟、事件传播、变更检测
 8. 安全地移除组件、回收实体并维护一致性
 
+## ECS 运行流程图
+
+```mermaid
+flowchart TD
+    A[用户调用 World API] --> B{操作类型}
+    B -->|spawn / insert| C[编译 Bundle 元数据]
+    C --> D[分配或校验 Entity]
+    D --> E[定位或创建目标 Archetype]
+    E --> F[写入 Table / SparseSet]
+    F --> G[更新 EntityLocation 与元数据]
+    G --> H[触发 add / insert / required 相关逻辑]
+
+    B -->|query| I[编译 QueryState]
+    I --> J[分析读写集合与过滤条件]
+    J --> K[筛选匹配 Archetype / Table]
+    K --> L[返回迭代器访问组件数据]
+
+    B -->|run systems| M[收集 System 元数据]
+    M --> N[构建依赖图与访问冲突图]
+    N --> O[执行 Schedule]
+    O --> P[刷新 deferred commands / events]
+    P --> Q[更新 ticks 与诊断信息]
+
+    H --> R[World 保持一致状态]
+    L --> R
+    Q --> R
+```
+
 ## 建议把 ECS 拆成六个运行时核心
 
 ### 核心一：身份与元数据核心
